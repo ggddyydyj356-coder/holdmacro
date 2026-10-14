@@ -1,0 +1,912 @@
+name: Build PlayDeck
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/playdeck app/src/main/res/xml app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'PlayDeck'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.playdeck'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.playdeck'
+                  minSdk 24
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <application
+                  android:label="PlayDeck"
+                  android:theme="@android:style/Theme.Material.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".PlayService"
+                      android:exported="true"
+                      android:label="PlayDeck"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/svc_desc" />
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="svc_desc">Game ke upar floating tools aur macro taps ke liye</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/example/playdeck/MainActivity.kt <<'EOF'
+          package com.example.playdeck
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private lateinit var list: LinearLayout
+              private lateinit var info: TextView
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun games(): MutableSet<String> {
+                  val s = getSharedPreferences("g", Context.MODE_PRIVATE).getStringSet("l", emptySet())
+                  return HashSet(s ?: emptySet())
+              }
+
+              private fun saveGames(s: Set<String>) {
+                  getSharedPreferences("g", Context.MODE_PRIVATE).edit().putStringSet("l", s).apply()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val sv = ScrollView(this)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(16), dp(32), dp(16), dp(16))
+                  sv.addView(root)
+
+                  val title = TextView(this)
+                  title.text = "PlayDeck"
+                  title.textSize = 26f
+                  root.addView(title)
+
+                  info = TextView(this)
+                  info.textSize = 14f
+                  root.addView(info)
+
+                  val b1 = Button(this)
+                  b1.text = "1) Accessibility ON karo"
+                  b1.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  root.addView(b1)
+
+                  val b2 = Button(this)
+                  b2.text = "2) Brightness permission do"
+                  b2.setOnClickListener {
+                      val i = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+                      i.data = Uri.parse("package:" + packageName)
+                      startActivity(i)
+                  }
+                  root.addView(b2)
+
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  head.setPadding(0, dp(16), 0, dp(8))
+                  val ht = TextView(this)
+                  ht.text = "Added games"
+                  ht.textSize = 18f
+                  head.addView(ht, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  val add = Button(this)
+                  add.text = "+ ADD"
+                  add.setOnClickListener { pickGame() }
+                  head.addView(add)
+                  root.addView(head)
+
+                  list = LinearLayout(this)
+                  list.orientation = LinearLayout.VERTICAL
+                  root.addView(list)
+
+                  setContentView(sv)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun pickGame() {
+                  val pm = packageManager
+                  val i = Intent(Intent.ACTION_MAIN)
+                  i.addCategory(Intent.CATEGORY_LAUNCHER)
+                  val apps = pm.queryIntentActivities(i, 0)
+                      .filter { it.activityInfo.packageName != packageName }
+                      .sortedBy { it.loadLabel(pm).toString().lowercase() }
+                  val names = apps.map { it.loadLabel(pm).toString() }.toTypedArray()
+                  AlertDialog.Builder(this)
+                      .setTitle("Game chuno")
+                      .setItems(names) { _, w ->
+                          val s = games()
+                          s.add(apps[w].activityInfo.packageName)
+                          saveGames(s)
+                          refresh()
+                      }
+                      .show()
+              }
+
+              private fun refresh() {
+                  val acc = if (PlayService.instance != null) "ON" else "OFF"
+                  val br = if (Settings.System.canWrite(this)) "OK" else "nahi di"
+                  info.text = "Accessibility: " + acc + "\nBrightness permission: " + br
+
+                  list.removeAllViews()
+                  val pm = packageManager
+                  for (pkg in games().sorted()) {
+                      val ai = try {
+                          pm.getApplicationInfo(pkg, 0)
+                      } catch (e: Exception) {
+                          continue
+                      }
+                      val row = LinearLayout(this)
+                      row.orientation = LinearLayout.HORIZONTAL
+                      row.gravity = Gravity.CENTER_VERTICAL
+                      row.setPadding(0, dp(4), 0, dp(4))
+
+                      val icon = ImageView(this)
+                      icon.setImageDrawable(pm.getApplicationIcon(ai))
+                      row.addView(icon, LinearLayout.LayoutParams(dp(48), dp(48)))
+
+                      val label = TextView(this)
+                      label.text = pm.getApplicationLabel(ai).toString()
+                      label.textSize = 16f
+                      label.setPadding(dp(8), 0, dp(8), 0)
+                      row.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                      val enter = Button(this)
+                      enter.text = "ENTER"
+                      enter.setOnClickListener {
+                          val s = PlayService.instance
+                          val li = pm.getLaunchIntentForPackage(pkg)
+                          if (s == null) {
+                              info.text = "Pehle Accessibility ON karo (upar button 1)"
+                          } else if (li != null) {
+                              li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              s.showPanel(pkg)
+                              startActivity(li)
+                          }
+                      }
+                      row.addView(enter)
+
+                      val rem = Button(this)
+                      rem.text = "X"
+                      rem.setOnClickListener {
+                          val s = games()
+                          s.remove(pkg)
+                          saveGames(s)
+                          refresh()
+                      }
+                      row.addView(rem)
+
+                      list.addView(row)
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/playdeck/PlayService.kt <<'EOF'
+          package com.example.playdeck
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.app.ActivityManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ApplicationInfo
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.media.AudioManager
+          import android.os.BatteryManager
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import java.io.File
+
+          class Marker(val view: TextView, val lp: WindowManager.LayoutParams)
+
+          class PlayService : AccessibilityService() {
+
+              companion object {
+                  var instance: PlayService? = null
+              }
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private var gamePkg: String? = null
+
+              private var panel: LinearLayout? = null
+              private var status: TextView? = null
+              private var crossView: View? = null
+              private var crossLevel = 0
+              private var infoView: TextView? = null
+
+              private var macroBar: LinearLayout? = null
+              private val markers = ArrayList<Marker>()
+              private val delays = longArrayOf(50L, 100L, 200L, 500L, 1000L)
+              private val modeNames = arrayOf("TOGGLE", "HOLD", "ONCE")
+              private var delayIdx = 1
+              private var macroMode = 0
+              @Volatile private var macroRunning = false
+              private var targets: List<FloatArray> = emptyList()
+              private var runBtn: Button? = null
+
+              private val touchFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                      WindowManager.LayoutParams.FLAG_SPLIT_TOUCH or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+
+              private val ghostFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+
+              override fun onServiceConnected() {
+                  instance = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  hidePanel()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun overlayLp(w: Int, h: Int, flags: Int): WindowManager.LayoutParams {
+                  val lp = WindowManager.LayoutParams(
+                      w, h,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      flags,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  return lp
+              }
+
+              private fun rm(v: View?) {
+                  if (v != null) {
+                      try {
+                          wm.removeView(v)
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              private fun makeDraggable(handle: View, target: View, lp: WindowManager.LayoutParams) {
+                  var sx = 0f
+                  var sy = 0f
+                  var ox = 0
+                  var oy = 0
+                  handle.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = e.rawX
+                              sy = e.rawY
+                              ox = lp.x
+                              oy = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = ox + (e.rawX - sx).toInt()
+                              lp.y = oy + (e.rawY - sy).toInt()
+                              try {
+                                  wm.updateViewLayout(target, lp)
+                              } catch (ex: Exception) {
+                              }
+                          }
+                      }
+                      true
+                  }
+              }
+
+              private fun smallBtn(text: String, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = text
+                  b.textSize = 11f
+                  b.minHeight = 0
+                  b.minimumHeight = 0
+                  b.setPadding(dp(4), dp(6), dp(4), dp(6))
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              private fun smallLabel(text: String): TextView {
+                  val t = TextView(this)
+                  t.text = text
+                  t.textSize = 10f
+                  t.setTextColor(Color.LTGRAY)
+                  t.setPadding(dp(2), dp(6), 0, 0)
+                  return t
+              }
+
+              // ---------- panel ----------
+
+              fun showPanel(pkg: String?) {
+                  gamePkg = pkg
+                  if (panel != null) return
+
+                  val p = LinearLayout(this)
+                  p.orientation = LinearLayout.VERTICAL
+                  p.setBackgroundColor(0xCC1E1E1E.toInt())
+                  p.setPadding(dp(4), dp(4), dp(4), dp(4))
+                  val lp = overlayLp(dp(120), WindowManager.LayoutParams.WRAP_CONTENT, touchFlags)
+                  lp.x = dp(4)
+                  lp.y = dp(120)
+
+                  val drag = TextView(this)
+                  drag.text = "= PLAYDECK ="
+                  drag.setTextColor(Color.rgb(255, 165, 0))
+                  drag.textSize = 11f
+                  drag.gravity = Gravity.CENTER
+                  drag.setPadding(0, dp(8), 0, dp(8))
+                  makeDraggable(drag, p, lp)
+
+                  val tools = LinearLayout(this)
+                  tools.orientation = LinearLayout.VERTICAL
+                  tools.visibility = View.GONE
+
+                  val toggle = smallBtn("TOOLS") {
+                      tools.visibility = if (tools.visibility == View.GONE) View.VISIBLE else View.GONE
+                      try {
+                          wm.updateViewLayout(p, lp)
+                      } catch (e: Exception) {
+                      }
+                  }
+
+                  val st = TextView(this)
+                  st.setTextColor(Color.WHITE)
+                  st.textSize = 10f
+                  st.gravity = Gravity.CENTER
+                  st.text = "Ready"
+                  status = st
+
+                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                  val vol = SeekBar(this)
+                  vol.max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                  vol.progress = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                  vol.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                          if (fromUser) am.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+                      }
+
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+
+                  val bri = SeekBar(this)
+                  bri.max = 255
+                  bri.progress = try {
+                      Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+                  } catch (e: Exception) {
+                      128
+                  }
+                  bri.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                          if (fromUser) setBrightness(v)
+                      }
+
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+
+                  tools.addView(smallBtn("MACRO") { toggleMacroBar() })
+                  tools.addView(smallBtn("CROSSHAIR") { cycleCross() })
+                  tools.addView(smallBtn("INFO") { toggleInfo() })
+                  tools.addView(smallBtn("CLEAN RAM") { cleanRam() })
+                  tools.addView(smallLabel("VOLUME"))
+                  tools.addView(vol)
+                  tools.addView(smallLabel("BRIGHTNESS"))
+                  tools.addView(bri)
+                  tools.addView(st)
+                  tools.addView(smallBtn("CLOSE PANEL") { hidePanel() })
+
+                  p.addView(drag)
+                  p.addView(toggle)
+                  p.addView(tools)
+
+                  panel = p
+                  wm.addView(p, lp)
+              }
+
+              fun hidePanel() {
+                  closeMacro()
+                  rm(crossView)
+                  crossView = null
+                  crossLevel = 0
+                  handler.removeCallbacks(infoTick)
+                  rm(infoView)
+                  infoView = null
+                  rm(panel)
+                  panel = null
+                  status = null
+              }
+
+              private fun setBrightness(v: Int) {
+                  if (Settings.System.canWrite(this)) {
+                      try {
+                          Settings.System.putInt(
+                              contentResolver,
+                              Settings.System.SCREEN_BRIGHTNESS_MODE,
+                              Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                          )
+                          Settings.System.putInt(
+                              contentResolver,
+                              Settings.System.SCREEN_BRIGHTNESS,
+                              v.coerceIn(1, 255)
+                          )
+                      } catch (e: Exception) {
+                          status?.text = "Brightness fail"
+                      }
+                  } else {
+                      status?.text = "App mein button 2 se permission do"
+                  }
+              }
+
+              // ---------- crosshair ----------
+
+              private fun cycleCross() {
+                  crossLevel = (crossLevel + 1) % 4
+                  rm(crossView)
+                  crossView = null
+                  if (crossLevel == 0) {
+                      status?.text = "Crosshair OFF"
+                      return
+                  }
+                  val size = dp(
+                      when (crossLevel) {
+                          1 -> 24
+                          2 -> 40
+                          else -> 64
+                      }
+                  )
+                  val v = object : View(this) {
+                      private val ring = Paint()
+                      private val dot = Paint()
+
+                      init {
+                          ring.isAntiAlias = true
+                          ring.style = Paint.Style.STROKE
+                          ring.strokeWidth = 3f
+                          ring.color = Color.RED
+                          dot.isAntiAlias = true
+                          dot.style = Paint.Style.FILL
+                          dot.color = Color.RED
+                      }
+
+                      override fun onDraw(canvas: Canvas) {
+                          val c = width / 2f
+                          canvas.drawCircle(c, c, c - 3f, ring)
+                          canvas.drawCircle(c, c, 3f, dot)
+                      }
+                  }
+                  val lp = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      ghostFlags,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.CENTER
+                  wm.addView(v, lp)
+                  crossView = v
+                  status?.text = "Crosshair " + crossLevel
+              }
+
+              // ---------- device info ----------
+
+              private val infoTick = object : Runnable {
+                  override fun run() {
+                      val v = infoView ?: return
+                      v.text = infoText()
+                      handler.postDelayed(this, 1000)
+                  }
+              }
+
+              private fun toggleInfo() {
+                  if (infoView != null) {
+                      handler.removeCallbacks(infoTick)
+                      rm(infoView)
+                      infoView = null
+                      return
+                  }
+                  val tv = TextView(this)
+                  tv.setTextColor(Color.GREEN)
+                  tv.textSize = 10f
+                  tv.setBackgroundColor(0x88000000.toInt())
+                  tv.setPadding(dp(4), dp(2), dp(4), dp(2))
+                  tv.text = infoText()
+                  val lp = overlayLp(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      ghostFlags
+                  )
+                  wm.addView(tv, lp)
+                  infoView = tv
+                  handler.removeCallbacks(infoTick)
+                  handler.postDelayed(infoTick, 1000)
+              }
+
+              private fun infoText(): String {
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val mi = ActivityManager.MemoryInfo()
+                  am.getMemoryInfo(mi)
+                  val bi = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                  val lvl = bi?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                  val scale = bi?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+                  val temp = (bi?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
+                  val pct = if (scale > 0 && lvl >= 0) lvl * 100 / scale else -1
+                  val cpu = try {
+                      File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq").readText().trim().toLong() / 1000
+                  } catch (e: Exception) {
+                      -1L
+                  }
+                  val cpuText = if (cpu >= 0) cpu.toString() + " MHz" else "?"
+                  return "RAM free " + (mi.availMem / 1048576) + " / " + (mi.totalMem / 1048576) + " MB\n" +
+                          "BAT " + pct + "%  " + temp + "C\n" +
+                          "CPU0 " + cpuText
+              }
+
+              // ---------- clean ram ----------
+
+              private fun freeMb(): Long {
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val mi = ActivityManager.MemoryInfo()
+                  am.getMemoryInfo(mi)
+                  return mi.availMem / 1048576
+              }
+
+              private fun cleanRam() {
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val before = freeMb()
+                  for (ai in packageManager.getInstalledApplications(0)) {
+                      val pn = ai.packageName
+                      if (pn == packageName || pn == gamePkg) continue
+                      if ((ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0) continue
+                      am.killBackgroundProcesses(pn)
+                  }
+                  status?.text = "Cleaning..."
+                  handler.postDelayed({
+                      status?.text = "Freed " + (freeMb() - before) + " MB"
+                  }, 1000)
+              }
+
+              // ---------- macro ----------
+
+              private fun toggleMacroBar() {
+                  if (macroBar != null) {
+                      closeMacro()
+                      return
+                  }
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.VERTICAL
+                  bar.setBackgroundColor(0xCC0D47A1.toInt())
+                  bar.setPadding(dp(4), dp(4), dp(4), dp(4))
+                  val lp = overlayLp(dp(120), WindowManager.LayoutParams.WRAP_CONTENT, touchFlags)
+                  lp.x = dp(130)
+                  lp.y = dp(120)
+
+                  val drag = TextView(this)
+                  drag.text = "= MACRO ="
+                  drag.setTextColor(Color.WHITE)
+                  drag.textSize = 11f
+                  drag.gravity = Gravity.CENTER
+                  drag.setPadding(0, dp(8), 0, dp(8))
+                  makeDraggable(drag, bar, lp)
+                  bar.addView(drag)
+
+                  bar.addView(smallBtn("+ POINT") { addMarker(null) })
+                  bar.addView(smallBtn("- POINT") { removeLastMarker() })
+
+                  val delayBtn = smallBtn("DELAY " + delays[delayIdx] + "ms") {}
+                  delayBtn.setOnClickListener {
+                      delayIdx = (delayIdx + 1) % delays.size
+                      delayBtn.text = "DELAY " + delays[delayIdx] + "ms"
+                  }
+                  bar.addView(delayBtn)
+
+                  val modeBtn = smallBtn("MODE: " + modeNames[macroMode]) {}
+                  modeBtn.setOnClickListener {
+                      macroStop()
+                      macroMode = (macroMode + 1) % modeNames.size
+                      modeBtn.text = "MODE: " + modeNames[macroMode]
+                  }
+                  bar.addView(modeBtn)
+
+                  val run = Button(this)
+                  run.text = "RUN"
+                  run.textSize = 14f
+                  run.setOnTouchListener { v, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              v.isPressed = true
+                              if (macroMode == 1) {
+                                  macroStart()
+                              } else if (macroRunning) {
+                                  macroStop()
+                              } else {
+                                  macroStart()
+                              }
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              v.isPressed = false
+                              if (macroMode == 1) macroStop()
+                          }
+                      }
+                      true
+                  }
+                  runBtn = run
+                  bar.addView(run, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(70)))
+
+                  macroBar = bar
+                  wm.addView(bar, lp)
+                  loadMarkers()
+              }
+
+              private fun closeMacro() {
+                  macroStop()
+                  if (macroBar != null) saveMarkers()
+                  for (m in markers) rm(m.view)
+                  markers.clear()
+                  rm(macroBar)
+                  macroBar = null
+                  runBtn = null
+              }
+
+              private fun addMarker(pos: IntArray?) {
+                  if (macroRunning) return
+                  val n = markers.size + 1
+                  val tv = TextView(this)
+                  tv.text = n.toString()
+                  tv.gravity = Gravity.CENTER
+                  tv.setTextColor(Color.WHITE)
+                  tv.textSize = 14f
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(0xAAE53935.toInt())
+                  bg.setStroke(dp(2), Color.WHITE)
+                  tv.background = bg
+                  val size = dp(44)
+                  val lp = overlayLp(size, size, touchFlags)
+                  lp.x = pos?.get(0) ?: (dp(120) + (n % 6) * dp(50))
+                  lp.y = pos?.get(1) ?: dp(300)
+                  makeDraggable(tv, tv, lp)
+                  wm.addView(tv, lp)
+                  markers.add(Marker(tv, lp))
+              }
+
+              private fun removeLastMarker() {
+                  if (macroRunning || markers.isEmpty()) return
+                  val m = markers.removeAt(markers.size - 1)
+                  rm(m.view)
+              }
+
+              private fun saveMarkers() {
+                  val sb = StringBuilder()
+                  for (m in markers) {
+                      sb.append(m.lp.x).append(',').append(m.lp.y).append(';')
+                  }
+                  getSharedPreferences("m", Context.MODE_PRIVATE).edit().putString("p", sb.toString()).apply()
+              }
+
+              private fun loadMarkers() {
+                  val t = getSharedPreferences("m", Context.MODE_PRIVATE).getString("p", "") ?: ""
+                  try {
+                      for (part in t.split(";")) {
+                          if (part.isBlank()) continue
+                          val xy = part.split(",")
+                          addMarker(intArrayOf(xy[0].toInt(), xy[1].toInt()))
+                      }
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun macroSetTouchable(touchable: Boolean) {
+                  for (m in markers) {
+                      if (touchable) {
+                          m.lp.flags = m.lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                      } else {
+                          m.lp.flags = m.lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                      }
+                      m.view.alpha = if (touchable) 1f else 0.35f
+                      try {
+                          wm.updateViewLayout(m.view, m.lp)
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              private fun macroStart() {
+                  if (macroRunning) return
+                  if (markers.isEmpty()) {
+                      status?.text = "Pehle + POINT dabao"
+                      return
+                  }
+                  saveMarkers()
+                  val t = ArrayList<FloatArray>()
+                  val loc = IntArray(2)
+                  for (m in markers) {
+                      m.view.getLocationOnScreen(loc)
+                      t.add(floatArrayOf(loc[0] + m.view.width / 2f, loc[1] + m.view.height / 2f))
+                  }
+                  targets = t
+                  macroSetTouchable(false)
+                  macroRunning = true
+                  runBtn?.text = "STOP"
+                  macroStep(0)
+              }
+
+              private fun macroStop() {
+                  if (!macroRunning) return
+                  macroRunning = false
+                  macroSetTouchable(true)
+                  runBtn?.text = "RUN"
+              }
+
+              private fun macroStep(i: Int) {
+                  if (!macroRunning) return
+                  if (i >= targets.size) {
+                      if (macroMode == 2) {
+                          macroStop()
+                      } else {
+                          macroStep(0)
+                      }
+                      return
+                  }
+                  val t = targets[i]
+                  val path = Path()
+                  path.moveTo(t[0], t[1])
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0L, 30L))
+                      .build()
+                  val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+                      override fun onCompleted(gestureDescription: GestureDescription?) {
+                          handler.postDelayed({ macroStep(i + 1) }, delays[delayIdx])
+                      }
+
+                      override fun onCancelled(gestureDescription: GestureDescription?) {
+                          handler.postDelayed({ macroStep(i) }, 100L)
+                      }
+                  }, null)
+                  if (!ok) {
+                      macroStop()
+                      status?.text = "Tap fail"
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "playdeck-${{ github.run_number }}" app/build/outputs/apk/debug/app-debug.apk --title "PlayDeck build ${{ github.run_number }}" --notes "Install karo"
