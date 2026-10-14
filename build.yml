@@ -1,0 +1,551 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/holdmacro app/src/main/res/xml app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'HoldMacro'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.holdmacro'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.holdmacro'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="HoldMacro"
+                  android:theme="@android:style/Theme.Material.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".MacroService"
+                      android:exported="true"
+                      android:label="HoldMacro"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/svc_desc" />
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="svc_desc">Gestures record karke replay karta hai</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/example/holdmacro/MainActivity.kt <<'EOF'
+          package com.example.holdmacro
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(48, 96, 48, 48)
+
+                  val info = TextView(this)
+                  info.textSize = 16f
+                  info.text = "1) Neeche se Accessibility settings kholo aur HoldMacro ko ON karo.\n" +
+                          "2) Wapas aakar Panel dikhao dabao.\n" +
+                          "3) REC dabao, screen par gesture karo (lal trail dikhega), phir SAVE dabao.\n" +
+                          "4) HOLD TO RUN ko dabake rakho: replay chalega. Ungli hatao: ruk jayega.\n" +
+                          "5) MOVE wali patti pakad ke panel ko kahin bhi khiska sakte ho."
+                  root.addView(info)
+
+                  val b1 = Button(this)
+                  b1.text = "Accessibility settings kholo"
+                  b1.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  root.addView(b1)
+
+                  val b2 = Button(this)
+                  b2.text = "Panel dikhao"
+                  b2.setOnClickListener {
+                      val s = MacroService.instance
+                      if (s == null) {
+                          info.text = "Pehle Accessibility mein HoldMacro ON karo."
+                      } else {
+                          s.showPanel()
+                          moveTaskToBack(true)
+                      }
+                  }
+                  root.addView(b2)
+
+                  val b3 = Button(this)
+                  b3.text = "Panel chhupao"
+                  b3.setOnClickListener { MacroService.instance?.hidePanel() }
+                  root.addView(b3)
+
+                  setContentView(root)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/holdmacro/MacroService.kt <<'EOF'
+          package com.example.holdmacro
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class Stroke(val start: Long, val dur: Long, val pts: List<FloatArray>)
+
+          class MacroService : AccessibilityService() {
+
+              companion object {
+                  var instance: MacroService? = null
+              }
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private var panel: LinearLayout? = null
+              private var panelLp: WindowManager.LayoutParams? = null
+              private var status: TextView? = null
+              private var recorder: RecView? = null
+              private var strokes: List<Stroke> = emptyList()
+              private var groups: List<List<Stroke>> = emptyList()
+              @Volatile private var running = false
+
+              override fun onServiceConnected() {
+                  instance = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  load()
+                  showPanel()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  running = false
+                  hidePanel()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              fun showPanel() {
+                  if (panel != null) return
+                  val p = LinearLayout(this)
+                  p.orientation = LinearLayout.VERTICAL
+                  p.setBackgroundColor(0xCC222222.toInt())
+                  p.setPadding(dp(4), dp(4), dp(4), dp(4))
+
+                  val lp = WindowManager.LayoutParams(
+                      dp(110),
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                              WindowManager.LayoutParams.FLAG_SPLIT_TOUCH,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(8)
+                  lp.y = dp(200)
+
+                  val drag = TextView(this)
+                  drag.text = "= MOVE ="
+                  drag.setTextColor(Color.YELLOW)
+                  drag.gravity = Gravity.CENTER
+                  drag.setPadding(0, dp(10), 0, dp(10))
+                  var sx = 0f
+                  var sy = 0f
+                  var ox = 0
+                  var oy = 0
+                  drag.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = e.rawX; sy = e.rawY; ox = lp.x; oy = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = ox + (e.rawX - sx).toInt()
+                              lp.y = oy + (e.rawY - sy).toInt()
+                              wm.updateViewLayout(p, lp)
+                          }
+                      }
+                      true
+                  }
+
+                  val st = TextView(this)
+                  st.setTextColor(Color.WHITE)
+                  st.textSize = 11f
+                  st.gravity = Gravity.CENTER
+                  st.text = if (groups.isEmpty()) "Pehle REC karo" else "Ready"
+                  status = st
+
+                  val rec = Button(this)
+                  rec.text = "REC"
+                  rec.setOnClickListener { startRec() }
+
+                  val save = Button(this)
+                  save.text = "SAVE"
+                  save.setOnClickListener { stopRec() }
+
+                  val hold = Button(this)
+                  hold.text = "HOLD\nTO RUN"
+                  hold.setOnTouchListener { v, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> { v.isPressed = true; startRun() }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { v.isPressed = false; stopRun() }
+                      }
+                      true
+                  }
+
+                  p.addView(drag)
+                  p.addView(st)
+                  p.addView(rec)
+                  p.addView(save)
+                  p.addView(hold, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, dp(110)))
+
+                  panel = p
+                  panelLp = lp
+                  wm.addView(p, lp)
+              }
+
+              fun hidePanel() {
+                  running = false
+                  recorder?.let { try { wm.removeView(it) } catch (e: Exception) {} }
+                  recorder = null
+                  panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
+                  panel = null
+              }
+
+              private fun startRec() {
+                  stopRun()
+                  if (recorder != null) return
+                  handler.post {
+                      val r = RecView(this)
+                      recorder = r
+                      val lp = WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                  WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT
+                      )
+                      wm.addView(r, lp)
+                      // panel ko upar laane ke liye dobara add karo
+                      panel?.let {
+                          wm.removeView(it)
+                          wm.addView(it, panelLp)
+                      }
+                      status?.text = "REC chalu"
+                  }
+              }
+
+              private fun stopRec() {
+                  val r = recorder ?: return
+                  handler.post {
+                      strokes = r.done.sortedBy { it.start }
+                      try { wm.removeView(r) } catch (e: Exception) {}
+                      recorder = null
+                      buildGroups()
+                      save()
+                      status?.text = "Saved: " + strokes.size
+                  }
+              }
+
+              private fun startRun() {
+                  if (recorder != null) return
+                  if (groups.isEmpty()) {
+                      status?.text = "Pehle REC karo"
+                      return
+                  }
+                  if (running) return
+                  running = true
+                  status?.text = "Chal raha hai"
+                  play(0)
+              }
+
+              private fun stopRun() {
+                  running = false
+                  status?.text = "Ruka"
+              }
+
+              private fun play(i: Int) {
+                  if (!running) return
+                  if (i >= groups.size) {
+                      handler.postDelayed({ play(0) }, 150)
+                      return
+                  }
+                  val g = groups[i].take(GestureDescription.getMaxStrokeCount())
+                  val gs = g.first().start
+                  val b = GestureDescription.Builder()
+                  var gEnd = 0L
+                  for (s in g) {
+                      val path = Path()
+                      path.moveTo(s.pts[0][0], s.pts[0][1])
+                      for (k in 1 until s.pts.size) {
+                          path.lineTo(s.pts[k][0], s.pts[k][1])
+                      }
+                      val d = minOf(maxOf(s.dur, 1L), GestureDescription.getMaxGestureDuration())
+                      b.addStroke(GestureDescription.StrokeDescription(path, s.start - gs, d))
+                      gEnd = maxOf(gEnd, s.start - gs + d)
+                  }
+                  val gap = if (i + 1 < groups.size)
+                      maxOf(groups[i + 1].first().start - (gs + gEnd), 0L) else 0L
+                  val ok = dispatchGesture(b.build(), object : AccessibilityService.GestureResultCallback() {
+                      override fun onCompleted(gestureDescription: GestureDescription?) {
+                          handler.postDelayed({ play(i + 1) }, gap)
+                      }
+                      override fun onCancelled(gestureDescription: GestureDescription?) {
+                          handler.postDelayed({ play(i) }, 100)
+                      }
+                  }, null)
+                  if (!ok) {
+                      running = false
+                      status?.text = "Gesture fail"
+                  }
+              }
+
+              private fun buildGroups() {
+                  val g = ArrayList<ArrayList<Stroke>>()
+                  var end = 0L
+                  for (s in strokes) {
+                      if (g.isEmpty() || s.start >= end) {
+                          g.add(arrayListOf(s))
+                          end = s.start + s.dur
+                      } else {
+                          g.last().add(s)
+                          end = maxOf(end, s.start + s.dur)
+                      }
+                  }
+                  groups = g
+              }
+
+              private fun save() {
+                  val sb = StringBuilder()
+                  for (s in strokes) {
+                      sb.append(s.start).append(';').append(s.dur).append(';')
+                      sb.append(s.pts.joinToString("|") { it[0].toString() + "," + it[1].toString() })
+                      sb.append('\n')
+                  }
+                  getSharedPreferences("m", Context.MODE_PRIVATE).edit().putString("d", sb.toString()).apply()
+              }
+
+              private fun load() {
+                  val t = getSharedPreferences("m", Context.MODE_PRIVATE).getString("d", "") ?: ""
+                  val l = ArrayList<Stroke>()
+                  try {
+                      for (line in t.lines()) {
+                          if (line.isBlank()) continue
+                          val p = line.split(";")
+                          val pts = p[2].split("|").map {
+                              val xy = it.split(",")
+                              floatArrayOf(xy[0].toFloat(), xy[1].toFloat())
+                          }
+                          l.add(Stroke(p[0].toLong(), p[1].toLong(), pts))
+                      }
+                  } catch (e: Exception) {
+                      l.clear()
+                  }
+                  strokes = l
+                  buildGroups()
+              }
+
+              inner class RecView(ctx: Context) : View(ctx) {
+                  private val paint = Paint()
+                  private val cur = HashMap<Int, ArrayList<FloatArray>>()
+                  private val t0 = HashMap<Int, Long>()
+                  private val active = HashMap<Int, Path>()
+                  private val drawn = ArrayList<Path>()
+                  val done = ArrayList<Stroke>()
+                  private var base = -1L
+
+                  init {
+                      setBackgroundColor(0x22FF0000)
+                      paint.color = Color.RED
+                      paint.strokeWidth = 8f
+                      paint.style = Paint.Style.STROKE
+                      paint.isAntiAlias = true
+                  }
+
+                  private fun begin(e: MotionEvent, i: Int, loc: IntArray) {
+                      val id = e.getPointerId(i)
+                      if (base < 0) base = e.eventTime
+                      val x = e.getX(i)
+                      val y = e.getY(i)
+                      val l = ArrayList<FloatArray>()
+                      l.add(floatArrayOf(x + loc[0], y + loc[1]))
+                      cur[id] = l
+                      t0[id] = e.eventTime
+                      val p = Path()
+                      p.moveTo(x, y)
+                      active[id] = p
+                  }
+
+                  private fun move(e: MotionEvent, i: Int, loc: IntArray) {
+                      val id = e.getPointerId(i)
+                      val l = cur[id] ?: return
+                      val x = e.getX(i) + loc[0]
+                      val y = e.getY(i) + loc[1]
+                      val last = l.last()
+                      val dx = x - last[0]
+                      val dy = y - last[1]
+                      if (dx * dx + dy * dy >= 36f) {
+                          l.add(floatArrayOf(x, y))
+                          active[id]?.lineTo(e.getX(i), e.getY(i))
+                      }
+                  }
+
+                  private fun end(e: MotionEvent, i: Int, loc: IntArray) {
+                      val id = e.getPointerId(i)
+                      val l = cur.remove(id) ?: return
+                      val s = t0.remove(id) ?: return
+                      val x = e.getX(i) + loc[0]
+                      val y = e.getY(i) + loc[1]
+                      val last = l.last()
+                      if (x != last[0] || y != last[1]) l.add(floatArrayOf(x, y))
+                      done.add(Stroke(s - base, maxOf(e.eventTime - s, 10L), l))
+                      active.remove(id)?.let { drawn.add(it) }
+                  }
+
+                  override fun onTouchEvent(e: MotionEvent): Boolean {
+                      val loc = IntArray(2)
+                      getLocationOnScreen(loc)
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
+                              begin(e, e.actionIndex, loc)
+                          MotionEvent.ACTION_MOVE ->
+                              for (i in 0 until e.pointerCount) move(e, i, loc)
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP ->
+                              end(e, e.actionIndex, loc)
+                          MotionEvent.ACTION_CANCEL ->
+                              for (i in 0 until e.pointerCount) end(e, i, loc)
+                      }
+                      invalidate()
+                      return true
+                  }
+
+                  override fun onDraw(canvas: Canvas) {
+                      for (p in drawn) canvas.drawPath(p, paint)
+                      for (p in active.values) canvas.drawPath(p, paint)
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.run_number }}" app/build/outputs/apk/debug/app-debug.apk --title "HoldMacro build ${{ github.run_number }}" --notes "Install karo"
